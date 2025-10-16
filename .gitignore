@@ -1,0 +1,49 @@
+*.class
+*.log
+
+# virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
+hs_err_pid*
+
+data/
+
+# IntelliJ IDEA-related files
+#
+# The .idea directory stores project settings.
+# It is generally recommended to ignore the entire .idea/ directory
+# as settings often differ between developers and local setups.
+.idea/
+
+# Gradle-related files
+# Some Scala projects use Gradle instead of SBT.
+.gradle/
+build/
+
+# SBT build directories and files
+#
+# The target/ directory contains compiled classes, generated sources, and build artifacts.
+# The project/target/ directory holds the compiled files for the build definition itself.
+target/
+project/target/
+
+# SBT-specific files that should not be committed
+#
+# lib_managed/ is used for managed dependencies.
+# src_managed/ is used for generated source files.
+lib_managed/
+src_managed/
+project/boot/
+project/plugins/project/
+
+# Compiled files
+#
+# Compiled Scala classes
+
+*.bak
+*.tmp
+
+# Operating system files
+# macOS-specific files
+.DS_Store
+
+# Windows-specific files
+Thumbs.db
