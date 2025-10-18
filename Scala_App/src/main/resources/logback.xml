@@ -14,6 +14,7 @@
         </encoder>
     </appender>
 
+    <!-- Console appender with simple level filter -->
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
         <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
             <level>INFO</level>
@@ -23,14 +24,29 @@
         </encoder>
     </appender>
 
-    <!-- Configure root logger -->
+    <!-- Configure root logger to log to FILE only -->
     <root level="DEBUG">
         <appender-ref ref="FILE" />
-        <appender-ref ref="CONSOLE" />
     </root>
 
-    <!-- Reduce noise from Spark -->
-    <logger name="org.apache.spark" level="WARN" />
-    <logger name="org.spark-project" level="WARN" />
-    <logger name="org.apache.hadoop" level="WARN" />
+    <!-- Configure specific loggers for your main classes -->
+    <logger name="DeltaIndexerDriver" level="INFO" additivity="false">
+        <appender-ref ref="FILE" />
+        <appender-ref ref="CONSOLE" />
+    </logger>
+
+    <logger name="utils" level="INFO" additivity="false">
+        <appender-ref ref="FILE" />
+        <appender-ref ref="CONSOLE" />
+    </logger>
+
+    <logger name="llm" level="INFO" additivity="false">
+        <appender-ref ref="FILE" />
+        <appender-ref ref="CONSOLE" />
+    </logger>
+
+    <!-- Set 3rd party loggers to WARN level -->
+    <logger name="org.apache" level="WARN" />
+    <logger name="io.netty" level="WARN" />
+    <logger name="org.sparkproject" level="WARN" />
 </configuration>

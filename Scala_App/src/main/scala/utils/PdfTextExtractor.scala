@@ -50,7 +50,7 @@ object PdfTextExtractor {
 
         stripper.setSuppressDuplicateOverlappingText(true) // fixes double-drawn glyphs
         stripper.setShouldSeparateByBeads(true) // respect article beads (columns)
-        stripper.setSortByPosition(true)
+//        stripper.setSortByPosition(true)
 
 
         val fullText = (1 to doc.getNumberOfPages).toVector.map { pNo =>
@@ -77,6 +77,8 @@ object PdfTextExtractor {
 
   private def normalize(s: String): String =
     s
+      // Remove soft hyphens but keep newlines (removed the de-hyphenation step)
+//      .replace("\u00AD", "")
       // Remove soft hyphens and de-hyphenate line breaks
       .replace("\u00AD", "")
       .replaceAll("(?m)-\\s*\\n\\s*", "")
@@ -85,15 +87,15 @@ object PdfTextExtractor {
       // Normalize ligatures that some fonts emit
       .replace("\uFB00", "ff").replace("\uFB01", "fi").replace("\uFB02", "fl")
       .replace("\uFB03", "ffi").replace("\uFB04", "ffl")
-      // Remove all non-Unicode (non-printable) characters
-      .replaceAll("[^\u0020-\u007E\u00A0-\uFFFF]", " ")
-      // Collapse excessive whitespace and newlines to a single space
-      .replaceAll("[ \t\n\r]+", " ")
+      // Remove all non-Unicode (non-printable) characters, but preserve newlines
+      .replaceAll("[^\u0020-\u007E\u00A0-\uFFFF\n]", " ")
+      // Collapse excessive whitespace but preserve newlines
+      .replaceAll("[ \t\r]+", " ")
       .trim
 
   def main(args: Array[String]): Unit = {
-    val pdfFilePath = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw1-rag-builder/data/1083142.1083145.pdf" // Replace with your PDF file path
-    val outputFilePath = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw1-rag-builder/data/extracted_text.txt"
+    val pdfFilePath = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/data/text_corpus/1083142.1083143.pdf" // Replace with your PDF file path
+    val outputFilePath = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/data/extracted_text.txt" // Output text file path
 
     val writer = new PrintWriter(new File(outputFilePath))
     extractText(pdfFilePath) match {

@@ -7,7 +7,6 @@ ThisBuild / javaHome := Some(file("/Library/Java/JavaVirtualMachines/openjdk-17.
 libraryDependencies ++= Seq(
   "ch.qos.logback" % "logback-classic" % "1.5.19",
   "org.slf4j" % "slf4j-api" % "2.0.17",
-  "org.apache.lucene" % "lucene-core" % "10.3.1",
   "org.apache.lucene" % "lucene-analysis-common" % "10.3.1",
   "org.apache.lucene" % "lucene-backward-codecs" % "10.3.1",
   "org.apache.lucene" % "lucene-queryparser" % "10.3.1",
@@ -20,6 +19,10 @@ libraryDependencies ++= Seq(
   // Spark
   "org.apache.spark" %% "spark-core" % "4.0.1",
   "org.apache.spark" %% "spark-sql" % "4.0.1",
+  "io.delta" %% "delta-spark" % "4.0.0",
+
+  // ML and language detection
+  "org.apache.opennlp" % "opennlp-tools" % "2.5.6",
 
   "org.apache.hadoop" % "hadoop-client" % "3.4.1",
 //  "org.apache.hadoop" % "hadoop-aws" % "3.4.2",
@@ -54,4 +57,5 @@ lazy val root = (project in file("."))
   .settings(
     name := "Scala_App"
   )
+
 
