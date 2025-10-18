@@ -112,6 +112,9 @@ object PdfChunker {
    */
   private def stripText(text: String): String = text.replaceAll("\\s+", " ").trim
 
+  // a case class to hold chunk information - start position, end position, and the chunk text
+  case class PdfChunk(startIndex: Int, endIndex: Int, text: String)
+
   /**
    * Create chunks from text using a sliding window approach
    * @param text The input text to chunk
@@ -125,12 +128,12 @@ object PdfChunker {
                     text: String,
                     windowSize: Int = 1500,
                     overlapSize: Int = 250,
-                    intelligentCut: Boolean = true,
+                    intelligentCut: Boolean = false,
                     minCutThreshold: Double = 0.6
-                  ): Vector[String] = {
+                  ): Vector[PdfChunk] = {
     // Normalize the text first
     val cleanText = stripText(text)
-    val chunks = Vector.newBuilder[String]
+    val chunks = Vector.newBuilder[PdfChunk]
 
     // Calculate stride (how much to move forward after each chunk)
     val stride = windowSize - overlapSize
@@ -185,8 +188,8 @@ object PdfChunker {
         currentSlice
       }
 
-      // Add the chunk to our collection
-      chunks += chunk
+      // Add the chunk to our collection with start and end indices
+      chunks += PdfChunk(position, position + chunk.length, chunk)
 
       // Calculate the next position
       // If we used intelligent cutting, adjust the stride based on the actual chunk size
@@ -215,7 +218,7 @@ object PdfChunker {
                     pdfPath: String,
                     windowSize: Int = 1500,
                     overlapSize: Int = 250
-                  ): Option[Vector[String]] = {
+                  ): Option[Vector[PdfChunk]] = {
     PdfTextExtractor.extractText(pdfPath).map { text =>
       createChunks(text, windowSize, overlapSize)
     }
@@ -243,11 +246,11 @@ object PdfChunker {
    * @param chunks Vector of text chunks
    * @return Map containing statistical information
    */
-  def calculateChunkStatistics(chunks: Vector[String]): Map[String, Any] = {
+  def calculateChunkStatistics(chunks: Vector[PdfChunk]): Map[String, Any] = {
     if (chunks.isEmpty) {
       Map("count" -> 0)
     } else {
-      val lengths = chunks.map(_.length)
+      val lengths = chunks.map(_.text.length)
       Map(
         "count" -> chunks.length,
         "min_length" -> lengths.min,
@@ -264,8 +267,8 @@ object PdfChunker {
    */
   def main(args: Array[String]): Unit = {
     // Default test PDF path - modify this to your actual test PDF file
-    val testPdfPath = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw1-rag-builder/data/1083142.1083145.pdf"
-    val logFilePath = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw1-rag-builder/data/chunker_results.txt"
+    val testPdfPath = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/data/text_corpus/1083142.1083143.pdf"
+    val logFilePath = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/data/chunker_test_log.txt"
 
     // Create log file writer
     val logFile = new File(logFilePath)
@@ -306,34 +309,23 @@ object PdfChunker {
             // Log preview of first few chunks
             logWriter.println("\nPreview of first 2 chunks:")
             chunks.take(2).zipWithIndex.foreach { case (chunk, i) =>
-              logWriter.println(s"  Chunk ${i+1} (${chunk.length} chars):")
-              logWriter.println(s"  ${chunk.take(150)}...")
+              logWriter.println(s"  Chunk ${i+1} (${chunk.text.length} chars):")
+              logWriter.println(s"  Start and End indexes: ${chunk.startIndex} - ${chunk.endIndex}")
+              logWriter.println(s"  ${chunk.text.take(150)}...")
             }
 
             // Log preview of last chunk
             logWriter.println("\nPreview of last chunk:")
             chunks.lastOption.foreach { chunk =>
-              logWriter.println(s"  Last chunk (${chunk.length} chars):")
-              logWriter.println(s"  ${chunk.take(150)}...")
-            }
-
-            // Look for examples of author initials
-            logWriter.println("\nSearching for a chunk with author initials...")
-            chunks.find(_.contains(", J.")) match {
-              case Some(chunk) =>
-                val startIdx = Math.max(0, chunk.indexOf(", J.") - 50)
-                val endIdx = Math.min(chunk.length, chunk.indexOf(", J.") + 50)
-                val excerpt = chunk.substring(startIdx, endIdx)
-                logWriter.println(s"  Found chunk with author initials (excerpt):")
-                logWriter.println(s"  ...${excerpt}...")
-              case None =>
-                logWriter.println("  No chunk with author initials pattern found.")
+              logWriter.println(s"  Last chunk (${chunk.text.length} chars):")
+              logWriter.println(s"  Start and End indexes: ${chunk.startIndex} - ${chunk.endIndex}")
+              logWriter.println(s"  ${chunk.text.take(150)}...")
             }
 
             // Also log a sample of all chunks (first 100 characters)
             logWriter.println("\nAll chunks:")
             chunks.zipWithIndex.foreach { case (chunk, i) =>
-              logWriter.println(s"  Chunk ${i+1} (${chunk.length} chars): ${chunk}...")
+              logWriter.println(s"  Chunk ${i+1} (${chunk.text.length} chars) Start = ${chunk.startIndex}, End = ${chunk.endIndex}: ${chunk.text}...")
             }
 
             // Print console feedback
