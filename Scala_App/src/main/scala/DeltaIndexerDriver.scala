@@ -23,6 +23,8 @@ object DeltaIndexerDriver {
         .master("local[*]") // change later when deploying to AWS EMR - will change to yarn or EMR default
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+        .config("spark.sql.warehouse.dir", "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/Scala_App/spark-warehouse")
+        .enableHiveSupport()
         .getOrCreate()
 
       import spark.implicits._
@@ -32,6 +34,10 @@ object DeltaIndexerDriver {
       spark.sql("CREATE DATABASE IF NOT EXISTS rag")
       logger.info("Available databases in the catalog:")
       spark.sql("SHOW DATABASES").show(false)
+
+      // list tables in rag schema
+      logger.info("Tables in 'rag' schema:")
+      spark.sql("SHOW TABLES IN rag").show(false)
 
       logger.info("Spark session created successfully")
 

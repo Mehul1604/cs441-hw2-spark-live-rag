@@ -4,6 +4,13 @@ ThisBuild / scalaVersion := "2.13.16"
 
 ThisBuild / javaHome := Some(file("/Library/Java/JavaVirtualMachines/openjdk-17.jdk/Contents/Home"))
 
+// 1. Force 'sbt run' to start your application in a new JVM
+fork := true
+// 2. Add the --add-opens flags to the new JVM
+javaOptions ++= Seq(
+  "--add-opens=java.base/java.net=ALL-UNNAMED"
+)
+
 libraryDependencies ++= Seq(
   "ch.qos.logback" % "logback-classic" % "1.5.19",
   "org.slf4j" % "slf4j-api" % "2.0.17",
@@ -20,6 +27,7 @@ libraryDependencies ++= Seq(
   "org.apache.spark" %% "spark-core" % "4.0.1",
   "org.apache.spark" %% "spark-sql" % "4.0.1",
   "io.delta" %% "delta-spark" % "4.0.0",
+  "org.apache.spark" %% "spark-hive" % "4.0.1", // Added Hive support
 
   // ML and language detection
   "org.apache.opennlp" % "opennlp-tools" % "2.5.6",
@@ -51,11 +59,11 @@ libraryDependencies ++= Seq(
 
 // Fix for Scala 2.13 compatibility issues
 dependencyOverrides += "org.scala-lang.modules" %% "scala-parser-combinators" % "2.4.0"
+// Add Janino dependency for logback filtering
+libraryDependencies += "org.codehaus.janino" % "janino" % "3.1.12"
 
 
 lazy val root = (project in file("."))
   .settings(
     name := "Scala_App"
   )
-
-
