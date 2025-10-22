@@ -2,11 +2,15 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.slf4j.LoggerFactory
-import java.io.File
 
+import java.io.File
 import utils.PdfTextExtractor.extractText
-import utils.PdfChunker.{createChunks, PdfChunk}
-import utils.LanguageDetector.{SerializableLanguageDetector, LanguageResult}
+import utils.PdfChunker.{PdfChunk, createChunks}
+import utils.LanguageDetector.{LanguageResult, SerializableLanguageDetector}
+import akka.actor.ActorSystem
+
+import scala.concurrent.ExecutionContext
+import llm.{Embeddings, OllamaClient, SerializableEmbeddingGenerator}
 
 object DeltaIndexerDriver {
   // Case class for chunk data - must be defined at the top level for serialization
@@ -16,6 +20,12 @@ object DeltaIndexerDriver {
 
   def main(args: Array[String]): Unit = {
     logger.info("Starting RAG Delta Indexer application")
+
+    // one arg/flag - --reindex - if this is an fresh reindex run deleting tables - if not then false
+
+
+    // parse --incr flag
+    val reindex: Boolean = args.contains("--reindex")
 
     try {
       val spark = SparkSession.builder
@@ -27,22 +37,38 @@ object DeltaIndexerDriver {
         .enableHiveSupport()
         .getOrCreate()
 
-      import spark.implicits._
+//      import spark.implicits._
 
-      // Create the 'rag' schema/database if it doesn't exist
-      logger.info("Ensuring 'rag' schema exists")
-      spark.sql("CREATE DATABASE IF NOT EXISTS rag")
-      logger.info("Available databases in the catalog:")
-      spark.sql("SHOW DATABASES").show(false)
+      if(!reindex) {
+        logger.info("Running in incremental mode")
 
-      // list tables in rag schema
-      logger.info("Tables in 'rag' schema:")
-      spark.sql("SHOW TABLES IN rag").show(false)
+        logger.info("Ensuring 'rag' schema exists")
+        spark.sql("CREATE DATABASE IF NOT EXISTS rag")
+
+
+        logger.info("Available databases in the catalog:")
+        spark.sql("SHOW DATABASES").show(false)
+
+        // list tables in rag schema
+        logger.info("Tables in 'rag' schema:")
+        spark.sql("SHOW TABLES IN rag").show(false)
+      } else {
+        logger.info("Running in full reindex mode")
+
+        // Delete and recreate rag schema
+        logger.info("Dropping and recreating 'rag' schema for full reindex")
+        spark.sql("DROP DATABASE IF EXISTS rag CASCADE")
+        spark.sql("CREATE DATABASE rag")
+
+        logger.info("Available databases in the catalog after recreation:")
+        spark.sql("SHOW DATABASES").show(false)
+      }
+
 
       logger.info("Spark session created successfully")
 
       // local path for now
-      val sourceFolder = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/data/text_corpus"
+      val sourceFolder = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/data/text_corpus_small"
       logger.info(s"Reading PDF files from: $sourceFolder")
 
       val rawPdfs = spark.read.format("binaryFile")
@@ -162,8 +188,7 @@ object DeltaIndexerDriver {
             col("docId"),
             col("chunkIndex"),
             col("chunkStartIndex"),
-            col("chunkEndIndex"),
-            col("chunkContentHash")),
+            col("chunkEndIndex")),
           256))
 
         .cache()
@@ -243,12 +268,72 @@ object DeltaIndexerDriver {
       val finalChunkCount = spark.table("rag.delta_pdf_chunks").count()
       logger.info(s"Total documents in rag.delta_pdf_docs: $finalDocCount")
       logger.info(s"Total chunks in rag.delta_pdf_chunks: $finalChunkCount")
+      // Uncomment to show sample rows
+//      logger.info("Sample rows from rag.delta_pdf_docs:")
+//      spark.table("rag.delta_pdf_docs").show(5, truncate = true)
+//
+//      logger.info("Sample rows from rag.delta_pdf_chunks:")
+//      spark.table("rag.delta_pdf_chunks").show(5, truncate = true)
 
-      logger.info("Sample rows from rag.delta_pdf_docs:")
-      spark.table("rag.delta_pdf_docs").show(5, truncate = true)
 
-      logger.info("Sample rows from rag.delta_pdf_chunks:")
-      spark.table("rag.delta_pdf_chunks").show(5, truncate = true)
+      // -- Embedding the delta chunks
+      logger.info("Embedding new chunks from rag.delta_pdf_chunks")
+
+      val modelName = "mxbai-embed-large"
+      val modelVersion = "v1"
+
+      // Create a serializable embedding generator that will be recreated on each executor
+      // to avoid serialization issues with ActorSystem and other non-serializable components
+      val embeddingGeneratorCreator = new SerializableEmbeddingGenerator(modelName, modelVersion)
+      logger.info(s"Created serializable embedding generator for model: $modelName v$modelVersion")
+
+      val chunksToEmbed = if(spark.catalog.tableExists("rag", "delta_embeddings")) {
+        logger.info("Embedding delta table exists. Performing delta detection for embeddings.")
+        val existingEmbeddings = spark.table("rag.delta_embeddings")
+          .where(col("modelName") === lit(modelName) && col("modelVersion") === lit(modelVersion))
+          .select("chunkId", "chunkContentHash", "chunkText")
+
+        val deltaChunks = chunkedDocs.alias("new_chunks")
+          .join(existingEmbeddings.alias("existing_embeddings"), Seq("chunkId", "chunkContentHash"), "left_anti")
+
+        deltaChunks
+      } else {
+        logger.info("Embedding delta table does not exist. All chunks will be embedded.")
+        chunkedDocs
+          .select("chunkId", "chunkContentHash", "chunkText")
+      }
+
+
+      logger.info("New or changed chunks to embed: " + chunksToEmbed.count())
+
+      // Since we have a batch DataFrame, not a streaming one, process it directly
+      logger.info("Starting embedding process for chunks in batch mode")
+
+      // Use the same batch processing logic but call it directly
+      import spark.implicits._
+      chunksToEmbed
+        .as[(String, String, String)]
+        .mapPartitions { rows =>
+          val batchedRows = rows.grouped(10).flatMap { batch =>
+            val texts = batch.map(_._3).toVector
+            val embeddings = embeddingGeneratorCreator.generateEmbeddings(texts)
+            batch.zip(embeddings).map { case ((chunkId, chunkContentHash, _), embedding) =>
+              (chunkId, chunkContentHash, modelName, modelVersion, embedding)
+            }
+          }
+          batchedRows
+        }
+        .toDF("chunkId", "chunkContentHash", "modelName", "modelVersion", "embedding")
+        .write.format("delta").mode("append")
+        .saveAsTable("rag.delta_embeddings")
+
+      logger.info("Embedding process completed for chunks")
+
+
+      // show sample 5 rows
+      logger.info("Sample rows from rag.delta_embeddings:")
+      spark.table("rag.delta_embeddings").show(5, truncate = true)
+
 
       logger.info("Shutting down Spark session")
       spark.stop()
