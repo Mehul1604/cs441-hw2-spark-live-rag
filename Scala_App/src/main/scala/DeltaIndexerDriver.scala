@@ -56,6 +56,9 @@ object DeltaIndexerDriver {
         tables.foreach { tableName =>
           logger.info(s"Sample rows from rag.$tableName:")
           spark.sql(s"SELECT * FROM rag.$tableName LIMIT 5").show(true)
+          // also show count of rows
+          val count = spark.sql(s"SELECT COUNT(*) as cnt FROM rag.$tableName").collect().head.getLong(0)
+          logger.info(s"Total rows in rag.$tableName: $count")
         }
 
         logger.info("Exiting application as per --show-tables flag")
@@ -268,125 +271,6 @@ object DeltaIndexerDriver {
 //        logger.info(s"DocId: $docId, ChunkIndex: $chunkIndex, Start: $chunkStart, End: $chunkEnd, SectionPath: ${new File(sectionPath).getName}, ChunkId: $chunkId, ChunkText: ${chunkText.take(50)}${if (chunkText.length > 50) "..." else ""}")
 //      }
 
-      // -- Upsert docs/chunks into Delta tables
-
-      // Write physical staging tables to break lineage and avoid re-computation
-      val stagingDocsTable = "rag.staging_pdf_docs_temp"
-      val stagingChunksTable = "rag.staging_pdf_chunks_temp"
-      logger.info(s"Writing physical staging tables: $stagingDocsTable and $stagingChunksTable")
-      // overwrite any previous staging snapshot for this run
-      docsToProcessCached.write.format("delta").mode("overwrite").saveAsTable(stagingDocsTable)
-      chunkedDocsCached.write.format("delta").mode("overwrite").saveAsTable(stagingChunksTable)
-
-      // Debug: Show the staging views content
-
-      logger.info("Verify staging view counts and sample rows BEFORE MERGE")
-      logger.info(s"$stagingDocsTable count = " + spark.table(stagingDocsTable).count())
-      spark.table(stagingDocsTable).show(5, truncate = true)
-      logger.info(s"$stagingChunksTable count = " + spark.table(stagingChunksTable).count())
-      spark.table(stagingChunksTable).show(5, truncate = true)
-
-      // rag.delta_pdf_docs table
-      logger.info("Upserting documents into Delta table: rag.delta_pdf_docs")
-      if(!spark.catalog.tableExists("rag", "delta_pdf_docs")) {  // Fixed tableExists call
-        logger.info("Delta table rag.delta_pdf_docs does not exist. Creating new table.")
-        pdfDocsCached.write
-          .format("delta")
-          .mode("overwrite")
-          .saveAsTable("rag.delta_pdf_docs")
-      } else {
-        logger.info(s"Delta table rag.delta_pdf_docs exists with ${spark.table("rag.delta_pdf_docs").count()} rows. Merging new documents.")
-
-        logger.info("Debug: Checking for document overlaps between staging and destination tables...")
-        val existingDocs = spark.table("rag.delta_pdf_docs")
-        val existingDocIds = existingDocs.select("docId").distinct()
-        val stagingDocIds = docsToProcessCached.select("docId").distinct()
-
-        // Count overlapping docIds
-        val overlappingDocs = stagingDocIds.join(existingDocIds, Seq("docId"), "inner")
-        val overlappingCount = overlappingDocs.count()
-        logger.info(s"Found $overlappingCount overlapping documents between staging and existing tables")
-        logger.info(s"Staging table has ${stagingDocIds.count()} distinct document IDs")
-
-        logger.info(s"DEBUG: -- docsToProcess BEFORE staging docs")
-        docsToProcessCached.show(5, truncate = true)
-
-        logger.info(s"DEBUG: -- Chunks BEFORE staging docs")
-        chunkedDocsCached.show(5, truncate = true)
-
-
-        // MERGE from the physical staging table to avoid any re-evaluation of lineage
-        spark.sql(s"""
-            |MERGE INTO rag.delta_pdf_docs target
-            |USING $stagingDocsTable source
-            |ON target.docId = source.docId
-            |WHEN MATCHED THEN UPDATE SET *
-            |WHEN NOT MATCHED THEN INSERT *
-            |""".stripMargin)
-      }
-
-      logger.info("Verify staging table counts and sample rows AFTER MERGE")
-      logger.info(s"$stagingDocsTable count = " + spark.table(stagingDocsTable).count())
-      spark.table(stagingDocsTable).show(5, truncate = true)
-      logger.info(s"$stagingChunksTable count = " + spark.table(stagingChunksTable).count())
-      spark.table(stagingChunksTable).show(5, truncate = true)
-
-      logger.info(s"DEBUG: -- docsToProcess AFTER staging docs")
-      docsToProcessCached.show(5, truncate = true)
-
-      logger.info(s"DEBUG: -- Chunks AFTER staging docs")
-      chunkedDocsCached.show(5, truncate = true)
-
-      // rag.delta_pdf_chunks table
-      logger.info("Upserting chunks into Delta table: rag.delta_pdf_chunks")
-      if(!spark.catalog.tableExists("rag", "delta_pdf_chunks")) {  // Fixed tableExists call
-        logger.info("Delta table rag.delta_pdf_chunks does not exist. Creating new table.")
-        chunkedDocsCached.write
-          .format("delta")
-          .mode("overwrite")
-          .saveAsTable("rag.delta_pdf_chunks")
-      } else {
-        logger.info(s"Delta table rag.delta_pdf_chunks exists with ${spark.table("rag.delta_pdf_chunks").count()} rows. Merging new chunks.")
-        // Debug: Check if any chunks already exist in the destination table
-        logger.info("Checking for chunk overlaps between staging and destination tables...")
-        val existingChunks = spark.table("rag.delta_pdf_chunks")
-        val existingChunkIds = existingChunks.select("chunkId").distinct()
-        // read staging chunk ids from the physical staging table to guarantee snapshot isolation
-        val stagingChunkIds = spark.table(stagingChunksTable).select("chunkId").distinct()
-
-        // Count overlapping chunkIds
-        val overlappingChunks = stagingChunkIds.join(existingChunkIds, Seq("chunkId"), "inner")
-        val overlappingCount = overlappingChunks.count()
-        logger.info(s"Found $overlappingCount overlapping chunks between staging and existing tables")
-        logger.info(s"Staging table has ${stagingChunkIds.count()} distinct chunk IDs")
-
-        // Log first 3 chunk IDs to debug merge issues
-        logger.info("Sample of chunked document IDs for debugging merge issues (from staging table):")
-        spark.table(stagingChunksTable).select("chunkId").limit(5).show(false)
-
-        // MERGE from the physical staging chunks table
-        spark.sql(s"""
-            |MERGE INTO rag.delta_pdf_chunks target
-            |USING $stagingChunksTable source
-            |ON target.chunkId = source.chunkId
-            |WHEN MATCHED THEN UPDATE SET *
-            |WHEN NOT MATCHED THEN INSERT *
-            |""".stripMargin)
-      }
-
-      // Show the delta tables count and sample 5 rows
-      val finalDocCount = spark.table("rag.delta_pdf_docs").count()
-      val finalChunkCount = spark.table("rag.delta_pdf_chunks").count()
-      logger.info(s"Total documents in rag.delta_pdf_docs: $finalDocCount")
-      logger.info(s"Total chunks in rag.delta_pdf_chunks: $finalChunkCount")
-      // Uncomment to show sample rows
-//      logger.info("Sample rows from rag.delta_pdf_docs:")
-//      spark.table("rag.delta_pdf_docs").show(5, truncate = true)
-//
-//      logger.info("Sample rows from rag.delta_pdf_chunks:")
-//      spark.table("rag.delta_pdf_chunks").show(5, truncate = true)
-
-
       // -- Embedding the delta chunks
       logger.info("Embedding new chunks from rag.delta_pdf_chunks")
 
@@ -415,15 +299,12 @@ object DeltaIndexerDriver {
           .select("chunkId", "chunkContentHash", "chunkText")
       }
 
-
-      logger.info("New or changed chunks to embed: " + chunksToEmbed.count())
-
       // Since we have a batch DataFrame, not a streaming one, process it directly
       logger.info("Starting embedding process for chunks in batch mode")
 
       // Use the same batch processing logic but call it directly
 
-      chunksToEmbed
+      val embeddedChunks = chunksToEmbed
         .as[(String, String, String)]
         .mapPartitions { rows =>
           val batchedRows = rows.grouped(10).flatMap { batch =>
@@ -436,18 +317,111 @@ object DeltaIndexerDriver {
           batchedRows
         }
         .toDF("chunkId", "chunkContentHash", "modelName", "modelVersion", "embedding")
-        .write.format("delta").mode("append")
-        .saveAsTable("rag.delta_embeddings")
+//        .write.format("delta").mode("append")
+//        .saveAsTable("rag.delta_embeddings")
 
+      val embeddedChunksCached = embeddedChunks.persist()
+      logger.info("New or changed chunks that were embedded: " + embeddedChunksCached.count())
       logger.info("Embedding process completed for chunks")
+      logger.info("Chunked Embeddings schema:")
+      embeddedChunksCached.printSchema()
+
+      // -- Upsert docs/chunks into Delta tables
+
+      // Write physical staging tables to break lineage and avoid re-computation
+      val stagingDocsTable = "rag.staging_pdf_docs_temp"
+      val stagingChunksTable = "rag.staging_pdf_chunks_temp"
+      val stagingEmbeddingsTable = "rag.staging_pdf_embeddings_temp"
+      logger.info(s"Writing physical staging tables: $stagingDocsTable, $stagingChunksTable and $stagingEmbeddingsTable")
+      // overwrite any previous staging snapshot for this run
+      docsToProcessCached.write.format("delta").mode("overwrite").saveAsTable(stagingDocsTable)
+      chunkedDocsCached.write.format("delta").mode("overwrite").saveAsTable(stagingChunksTable)
+      embeddedChunksCached.write.format("delta").mode("overwrite").saveAsTable(stagingEmbeddingsTable)
 
 
+      // rag.delta_pdf_docs table
+      logger.info("Upserting documents into Delta table: rag.delta_pdf_docs")
+      if(!spark.catalog.tableExists("rag", "delta_pdf_docs")) {  // Fixed tableExists call
+        logger.info("Delta table rag.delta_pdf_docs does not exist. Creating new table.")
+        pdfDocsCached.write
+          .format("delta")
+          .mode("overwrite")
+          .saveAsTable("rag.delta_pdf_docs")
+      } else {
+        logger.info(s"Delta table rag.delta_pdf_docs exists with ${spark.table("rag.delta_pdf_docs").count()} rows. Merging new documents.")
+
+        // MERGE from the physical staging table to avoid any re-evaluation of lineage
+        spark.sql(s"""
+            |MERGE INTO rag.delta_pdf_docs target
+            |USING $stagingDocsTable source
+            |ON target.docId = source.docId
+            |WHEN MATCHED THEN UPDATE SET *
+            |WHEN NOT MATCHED THEN INSERT *
+            |""".stripMargin)
+      }
+
+
+      // rag.delta_pdf_chunks table
+      logger.info("Upserting chunks into Delta table: rag.delta_pdf_chunks")
+      if(!spark.catalog.tableExists("rag", "delta_pdf_chunks")) {  // Fixed tableExists call
+        logger.info("Delta table rag.delta_pdf_chunks does not exist. Creating new table.")
+        chunkedDocsCached.write
+          .format("delta")
+          .mode("overwrite")
+          .saveAsTable("rag.delta_pdf_chunks")
+      } else {
+        logger.info(s"Delta table rag.delta_pdf_chunks exists with ${spark.table("rag.delta_pdf_chunks").count()} rows. Merging new chunks.")
+
+        // MERGE from the physical staging chunks table
+        spark.sql(s"""
+            |MERGE INTO rag.delta_pdf_chunks target
+            |USING $stagingChunksTable source
+            |ON target.chunkId = source.chunkId
+            |WHEN MATCHED THEN UPDATE SET *
+            |WHEN NOT MATCHED THEN INSERT *
+            |""".stripMargin)
+      }
+
+      // rag.delta_embeddings table
+      logger.info("Upserting embeddings into Delta table: rag.delta_embeddings")
+      if(!spark.catalog.tableExists("rag", "delta_embeddings")) {  // Fixed tableExists call
+        logger.info("Delta table rag.delta_embeddings does not exist. Creating new table.")
+        embeddedChunksCached.write
+          .format("delta")
+          .mode("overwrite")
+          .saveAsTable("rag.delta_embeddings")
+      } else {
+        logger.info(s"Delta table rag.delta_embeddings exists with ${spark.table("rag.delta_embeddings").count()} rows. Merging new embeddings.")
+        // MERGE from the physical staging embeddings table
+        spark.sql(s"""
+            |MERGE INTO rag.delta_embeddings target
+            |USING $stagingEmbeddingsTable source
+            |ON target.chunkId = source.chunkId AND target.modelName = source.modelName AND target.modelVersion = source.modelVersion
+            |WHEN MATCHED THEN UPDATE SET *
+            |WHEN NOT MATCHED THEN INSERT *
+            |""".stripMargin)
+      }
+
+
+      // Show all final tables after complete delta processing
+
+      // Show the delta tables count and sample 5 rows
+      val finalDocCount = spark.table("rag.delta_pdf_docs").count()
+      val finalChunkCount = spark.table("rag.delta_pdf_chunks").count()
       val finalEmbeddingCount = spark.table("rag.delta_embeddings").count()
+      logger.info(s"Total documents in rag.delta_pdf_docs: $finalDocCount")
+      logger.info(s"Total chunks in rag.delta_pdf_chunks: $finalChunkCount")
       logger.info(s"Total embeddings in rag.delta_embeddings: $finalEmbeddingCount")
-      // Uncomment to show final embedding sample rows
-      // show sample 5 rows
+      // Uncomment to show sample rows
+//      logger.info("Sample rows from rag.delta_pdf_docs:")
+//      spark.table("rag.delta_pdf_docs").show(5, truncate = true)
+//
+//      logger.info("Sample rows from rag.delta_pdf_chunks:")
+//      spark.table("rag.delta_pdf_chunks").show(5, truncate = true)
+
 //      logger.info("Sample rows from rag.delta_embeddings:")
 //      spark.table("rag.delta_embeddings").show(5, truncate = true)
+
 
       // == Publish New Versioned Retrieval Index Snapshot
       logger.info("Publishing new versioned retrieval index snapshot")

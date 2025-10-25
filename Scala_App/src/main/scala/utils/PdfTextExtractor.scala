@@ -94,8 +94,8 @@ object PdfTextExtractor {
       .trim
 
   def main(args: Array[String]): Unit = {
-    val pdfFilePath = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/data/text_corpus/1083142.1083143.pdf" // Replace with your PDF file path
-    val outputFilePath = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/data/extracted_text.txt" // Output text file path
+    val pdfFilePath = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/data/text_corpus_small/1083142.1083153.pdf" // Replace with your PDF file path
+    val outputFilePath = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/data/extracted_text_edited.txt" // Output text file path
 
     val writer = new PrintWriter(new File(outputFilePath))
     extractText(pdfFilePath) match {
@@ -269,8 +269,8 @@ object PdfChunker {
    */
   def main(args: Array[String]): Unit = {
     // Default test PDF path - modify this to your actual test PDF file
-    val testPdfPath = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/data/text_corpus/1083142.1083143.pdf"
-    val logFilePath = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/data/chunker_test_log.txt"
+    val testPdfPath = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/data/text_corpus_small/1083142.1083153.pdf"
+    val logFilePath = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/data/chunker_test_log_edited.txt"
 
     // Create log file writer
     val logFile = new File(logFilePath)
@@ -287,9 +287,9 @@ object PdfChunker {
 
       // Test with different window sizes and overlap configurations
       val configurations = Seq(
-        (1000, 200, "Small window, 20% overlap"),
-        (1500, 250, "Medium window, ~17% overlap"),
-        (2000, 400, "Large window, 20% overlap")
+//        (1000, 200, "Small window, 20% overlap"),
+        (1500, 250, "Medium window, ~17% overlap")
+//        (2000, 400, "Large window, 20% overlap")
       )
 
       for ((windowSize, overlapSize, description) <- configurations) {
