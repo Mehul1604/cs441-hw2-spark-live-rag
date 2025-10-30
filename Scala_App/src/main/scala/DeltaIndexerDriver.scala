@@ -1,18 +1,15 @@
-import org.apache.spark.sql.{Row, SparkSession}
+import config.AppConfig
+import llm.SerializableEmbeddingGenerator
+import model.{ChunkData, RunMetrics}
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.functions._
-import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.slf4j.LoggerFactory
+import utils.LanguageDetector.SerializableLanguageDetector
+import utils.PdfChunker.createChunks
+import utils.PdfTextExtractor.{extractText, safeExtractText}
 
 import java.io.File
-import utils.PdfTextExtractor.extractText
-import utils.PdfChunker.{PdfChunk, createChunks}
-import utils.LanguageDetector.{LanguageResult, SerializableLanguageDetector}
-import model.ChunkData
-import akka.actor.ActorSystem
-
-import scala.concurrent.ExecutionContext
-import llm.{Embeddings, OllamaClient, SerializableEmbeddingGenerator}
-import org.apache.spark.sql.types._
+import java.util.UUID
 
 object DeltaIndexerDriver {
 
@@ -21,21 +18,37 @@ object DeltaIndexerDriver {
   def main(args: Array[String]): Unit = {
     logger.info("Starting RAG Delta Indexer application")
 
-    // arg/flag --reindex - if this is an fresh reindex run deleting tables - if not then false
-    // arg/flag --show-tables - if this is true then dont do anything just show the tables in rag schema and exit
-
-
-    // parse --incr flag
+    // Parse command line arguments
     val reindex: Boolean = args.contains("--reindex")
     val showTables = args.contains("--show-tables")
+    val envArg = args.find(_.startsWith("--env=")) match {
+      case Some(arg) => arg.substring("--env=".length)
+      case None => "local"
+    }
+
+    // Load configuration
+    val appConfig = AppConfig.load(envArg)
+    logger.info(s"Configuration loaded for environment: ${envArg}")
+
+    // Parse embedding model name from args, fallback to config
+    val modelName = args.find(_.startsWith("--model=")) match {
+      case Some(arg) =>
+        val model = arg.substring("--model=".length)
+        logger.info(s"Using embedding model from command line argument: $model")
+        model
+      case None =>
+        val model = appConfig.embedding.modelName
+        logger.info(s"Using embedding model from configuration: $model")
+        model
+    }
 
     try {
       val spark = SparkSession.builder
-        .appName("RAG Delta Indexer")
-        .master("local[*]") // change later when deploying to AWS EMR - will change to yarn or EMR default
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-        .config("spark.sql.warehouse.dir", "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/Scala_App/spark-warehouse")
+        .appName(appConfig.spark.appName)
+        .master(appConfig.spark.master)
+        .config("spark.sql.extensions", appConfig.spark.extensions)
+        .config("spark.sql.catalog.spark_catalog", appConfig.spark.catalog)
+        .config("spark.sql.warehouse.dir", appConfig.spark.warehouseDir)
         .enableHiveSupport()
         .getOrCreate()
 
@@ -94,8 +107,15 @@ object DeltaIndexerDriver {
 
       logger.info("Spark session created successfully")
 
-      // local path for now
-      val sourceFolder = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/data/text_corpus_small"
+      // ---- Recording Metrics ----
+
+      val runId = UUID.randomUUID().toString
+      val t0 = System.nanoTime()
+
+      // Reading metrics
+      val tRead0 = System.nanoTime()
+
+      val sourceFolder = appConfig.data.sourceFolder
       logger.info(s"Reading PDF files from: $sourceFolder")
 
       val rawPdfs = spark.read.format("binaryFile")
@@ -110,6 +130,41 @@ object DeltaIndexerDriver {
       val pdfCount = rawPdfs.count()
       logger.info(s"Loaded $pdfCount PDF files from $sourceFolder")
 
+      // Create local directory for downloaded PDFs
+      val downloadedPdfsDir = appConfig.data.downloadedPdfsDir
+      val downloadDir = new File(downloadedPdfsDir)
+      if (!downloadDir.exists()) {
+        downloadDir.mkdirs()
+        logger.info(s"Created local PDF download directory: $downloadedPdfsDir")
+      }
+
+      // Download PDFs to local file system and create a mapping
+      logger.info("Downloading PDFs to local file system for text extraction...")
+      val pdfPathMapping = rawPdfs.collect().map { row =>
+        val originalPath = row.getAs[String]("path")
+        val content = row.getAs[Array[Byte]]("content")
+        val fileName = new File(originalPath).getName
+        val localPath = s"$downloadedPdfsDir/$fileName"
+        logger.info("To local path: " + localPath)
+
+        // Write the PDF content to local file
+        val localFile = new File(localPath)
+        val fos = new java.io.FileOutputStream(localFile)
+        try {
+          fos.write(content)
+          fos.flush()
+        } finally {
+          fos.close()
+        }
+
+        (originalPath, localPath)
+      }.toMap
+
+      logger.info(s"Downloaded ${pdfPathMapping.size} PDFs to local directory: $downloadedPdfsDir")
+
+      // Create broadcast variable for the path mapping
+      val pathMappingBroadcast = spark.sparkContext.broadcast(pdfPathMapping)
+
       // Test language detector standalone before creating UDF
       val langDetectorService = new SerializableLanguageDetector()
       val testText = "This is a sample English text."
@@ -120,9 +175,26 @@ object DeltaIndexerDriver {
       val langDetectorBroadcast = spark.sparkContext.broadcast(langDetectorService)
 
       // Further Processing to get the text and other metadata
-      val getTextUdf = udf((fileUri: String) => extractText(fileUri.replace("file:", "")) match {
-        case Some(text) => text
-        case None => ""
+
+//      val getTextUdf = udf((fileUri: String) => {
+//        // Get the local path from the mapping
+//        val localPath = pathMappingBroadcast.value.getOrElse(fileUri, fileUri.replace("file:", ""))
+//        extractText(localPath) match {
+//          case Some(text) => {
+//            logger.info("Got text successfully for PDF: " + localPath)
+//            text
+//          }
+//          case None => {
+//            logger.info("No text extracted for PDF: " + localPath)
+//            ""
+//          }
+//        }
+//      })
+
+      val getTextUdf = udf((fileUri: String) => {
+        // Get the local path from the mapping
+        val localPath = pathMappingBroadcast.value.getOrElse(fileUri, fileUri.replace("file:", ""))
+        safeExtractText(localPath)
       })
 
       // Create a UDF that uses the broadcast variable
@@ -134,10 +206,29 @@ object DeltaIndexerDriver {
         }
       })
 
+//      val pdfDocs = rawPdfs.select(
+//        col("path").as("pdfUri"),
+//        getTextUdf(col("pdfUri")).as("text")
+//      )
+//        .withColumn("language", detectLanguageUdf(col("text")))
+//        // get the first line of the text as title by getting substring till first new line
+//        .withColumn("title", trim(expr("substring_index(text, '\n', 1)")))
+//        // get the docId by sha2 hashing the pdfUri
+//        .withColumn("docId", sha2(col("pdfUri"), 256))
+//        // get the content hash by sha2 hashing the text
+//        .withColumn("contentHash", sha2(col("text"), 256))
+////        .filter(col("text") =!= "")
+//        .cache()
+
       val pdfDocs = rawPdfs.select(
-        col("path").as("pdfUri"),
-        getTextUdf(col("pdfUri")).as("text")
-      )
+          col("path").as("pdfUri"),
+        // getTextUdf returns ExtractTextResult case class
+        // from that get text field for text col and debug for debug column
+          getTextUdf(col("pdfUri")).as("extractResult")
+
+        )
+        .withColumn("text", col("extractResult.text"))
+        .withColumn("debugInfo", col("extractResult.debug"))
         .withColumn("language", detectLanguageUdf(col("text")))
         // get the first line of the text as title by getting substring till first new line
         .withColumn("title", trim(expr("substring_index(text, '\n', 1)")))
@@ -145,7 +236,7 @@ object DeltaIndexerDriver {
         .withColumn("docId", sha2(col("pdfUri"), 256))
         // get the content hash by sha2 hashing the text
         .withColumn("contentHash", sha2(col("text"), 256))
-        .filter(col("text") =!= "")
+        //        .filter(col("text") =!= "")
         .cache()
 
       // display the schema of the processed pdf documents
@@ -156,6 +247,11 @@ object DeltaIndexerDriver {
       val pdfDocsCached = pdfDocs.persist()
       val processedPdfCount = pdfDocsCached.count()
       logger.info(s"Number of processed PDF documents with extracted text: $processedPdfCount")
+
+      // Reading Metrics
+      val docsScanned = processedPdfCount
+      val bytesScanned = rawPdfs.agg(sum("length")).collect().head.getLong(0)
+      val tReadMs = (System.nanoTime() - tRead0) / 1e6.toLong
 
       // Uncomment to log sample processed documents
 //      logger.info("Sample processed PDF documents (first 5):")
@@ -176,6 +272,9 @@ object DeltaIndexerDriver {
 
       // -- Delta detection
 
+      // Docs Delta Metrics
+      val tDelta0 = System.nanoTime()
+
       val docsToProcess = if (spark.catalog.tableExists("rag", "delta_pdf_docs")) {
         logger.info("Delta table exists. Performing delta detection.")
         val existingDocs = spark.table("rag.delta_pdf_docs")
@@ -195,6 +294,10 @@ object DeltaIndexerDriver {
       // Important - this cache will help in reusing the filtered docs multiple times
       val docsToProcessCached = docsToProcess.persist()
       logger.info(s"New or changed documents in this run: ${docsToProcessCached.count()}")
+
+      // Docs Delta Metrics
+      val docsNewOrChanged = docsToProcessCached.count()
+      val tDeltaMs = (System.nanoTime() - tDelta0) / 1e6.toLong
 
       // -- Chunking
       val chunkUdf = udf((text: String) => {
@@ -226,6 +329,9 @@ object DeltaIndexerDriver {
 //            col("chunkEndIndex")),
 //          256))
 
+      // Chunking Metrics
+      val tChunk0 = System.nanoTime()
+
       val chunkedDocs = docsToProcessCached
         .flatMap { row =>
           val text = row.getAs[String]("text")
@@ -252,6 +358,10 @@ object DeltaIndexerDriver {
       logger.info("Chunked documents schema:")
       chunkedDocsCached.printSchema()
 
+      // Chunking Metrics
+      val chunksNewOrChanged = chunkedDocsCached.count()
+      val tChunkMs = (System.nanoTime() - tChunk0) / 1e6.toLong
+
       // Uncomment to log sample chunked documents
 //      logger.info("Sample chunked documents (first 5):")
 //      val sampleChunks = chunkedDocs
@@ -274,13 +384,15 @@ object DeltaIndexerDriver {
       // -- Embedding the delta chunks
       logger.info("Embedding new chunks from rag.delta_pdf_chunks")
 
-      val modelName = "mxbai-embed-large"
-      val modelVersion = "v1"
+      val modelVersion = appConfig.embedding.modelVersion
 
       // Create a serializable embedding generator that will be recreated on each executor
       // to avoid serialization issues with ActorSystem and other non-serializable components
       val embeddingGeneratorCreator = new SerializableEmbeddingGenerator(modelName, modelVersion)
       logger.info(s"Created serializable embedding generator for model: $modelName v$modelVersion")
+
+      // Chunk Embedding Metrics
+      val tEmbed0 = System.nanoTime()
 
       val chunksToEmbed = if(spark.catalog.tableExists("rag", "delta_embeddings")) {
         logger.info("Embedding delta table exists. Performing delta detection for embeddings.")
@@ -299,15 +411,18 @@ object DeltaIndexerDriver {
           .select("chunkId", "chunkContentHash", "chunkText")
       }
 
+      // Chunk Embedding Metrics
+      val embeddingsNew = chunksToEmbed.count()
+      val reusedEmbeddings = chunksNewOrChanged - embeddingsNew
+
       // Since we have a batch DataFrame, not a streaming one, process it directly
       logger.info("Starting embedding process for chunks in batch mode")
 
-      // Use the same batch processing logic but call it directly
-
+      // Use the configured batch size for embedding processing
       val embeddedChunks = chunksToEmbed
         .as[(String, String, String)]
         .mapPartitions { rows =>
-          val batchedRows = rows.grouped(10).flatMap { batch =>
+          val batchedRows = rows.grouped(appConfig.embedding.batchSize).flatMap { batch =>
             val texts = batch.map(_._3).toVector
             val embeddings = embeddingGeneratorCreator.generateEmbeddings(texts)
             batch.zip(embeddings).map { case ((chunkId, chunkContentHash, _), embedding) =>
@@ -325,6 +440,9 @@ object DeltaIndexerDriver {
       logger.info("Embedding process completed for chunks")
       logger.info("Chunked Embeddings schema:")
       embeddedChunksCached.printSchema()
+
+      // Chunk Embedding Metrics
+      val tEmbedMs = (System.nanoTime() - tEmbed0) / 1e6.toLong
 
       // -- Upsert docs/chunks into Delta tables
 
@@ -424,6 +542,10 @@ object DeltaIndexerDriver {
 
 
       // == Publish New Versioned Retrieval Index Snapshot
+
+      // Publishing Metrics
+      val tPub0 = System.nanoTime()
+
       logger.info("Publishing new versioned retrieval index snapshot")
       val timestamp = System.currentTimeMillis()
       val versionedTableName = s"rag.retrieval_index_$timestamp"
@@ -444,7 +566,7 @@ object DeltaIndexerDriver {
       logger.info(s"Created new retrieval index snapshot table: $versionedTableName")
       logger.info(s"Number of entries in the new retrieval index snapshot: ${snapShotDF.count()}")
 
-      val snapPath = s"/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/data/index_snapshots/${modelName}/${modelVersion}/$timestamp"
+      val snapPath = s"${appConfig.data.snapshotsBasePath}/${modelName}/${modelVersion}/$timestamp"
       logger.info(s"Writing retrieval index snapshot to path: $snapPath")
       snapShotDF.write
         .format("delta")
@@ -454,6 +576,72 @@ object DeltaIndexerDriver {
       // Uncomment to show 5 sample rows from the snapshot
 //      logger.info(s"Sample rows from the new retrieval index snapshot table: $versionedTableName")
 //      snapShotDF.show(5, truncate = true)
+
+      // Publishing Metrics
+      val tPublishMs = (System.nanoTime() - tPub0) / 1e6.toLong
+
+
+      // ---- Final Metrics Logging ----
+      val tTotalMs = (System.nanoTime() - t0) / 1e6.toLong
+
+      val docsPerSec = if (tTotalMs > 0) docsScanned.toDouble / (tTotalMs.toDouble / 1000.0) else 0.0
+      val embedsPerSec = if (tTotalMs > 0) embeddingsNew.toDouble / (tTotalMs.toDouble / 1000.0) else 0.0
+
+      val docsSkippedRatio =
+        if (docsScanned > 0) (docsScanned - docsNewOrChanged).toDouble / docsScanned else 0.0
+      val embeddingsReuseRatio =
+        if (chunksNewOrChanged > 0) reusedEmbeddings.toDouble / chunksNewOrChanged else 0.0
+
+      val noopRun = (docsNewOrChanged == 0 && embeddingsNew == 0)
+
+      // log all the metrics
+      logger.info(s"Run Metrics:")
+      logger.info(s"Run ID: $runId")
+      logger.info(s"Documents Scanned: $docsScanned")
+      logger.info(s"Bytes Scanned: $bytesScanned")
+      logger.info(s"New or Changed Documents: $docsNewOrChanged")
+      logger.info(s"New or Changed Chunks: $chunksNewOrChanged")
+      logger.info(s"New Embeddings Generated: $embeddingsNew")
+      logger.info(s"Reused Embeddings: $reusedEmbeddings")
+      logger.info(s"Time Taken (ms) - Read: $tReadMs, Delta: $tDeltaMs, Chunk: $tChunkMs, Embed: $tEmbedMs, Publish: $tPublishMs, Total: $tTotalMs")
+      logger.info(f"Processing Rates - Docs/sec: $docsPerSec%.2f, Embeddings/sec: $embedsPerSec%.2f")
+      logger.info(f"Ratios - Docs Skipped: $docsSkippedRatio%.4f, Embeddings Reuse: $embeddingsReuseRatio%.4f")
+      logger.info(s"No-op Run: $noopRun")
+
+
+      val metrics = Seq(RunMetrics(
+        run_id = runId,
+        run_ts = System.currentTimeMillis(),
+        docs_scanned = docsScanned,
+        bytes_scanned = bytesScanned,
+        docs_new_or_changed = docsNewOrChanged,
+        chunks_new_or_changed = chunksNewOrChanged,
+        embeddings_new = embeddingsNew,
+        embeddings_reused = reusedEmbeddings,
+        t_read_ms = tReadMs,
+        t_delta_ms = tDeltaMs,
+        t_chunk_ms = tChunkMs,
+        t_embed_ms = tEmbedMs,
+        t_publish_ms = tPublishMs,
+        t_total_ms = tTotalMs,
+        docs_per_sec = docsPerSec,
+        embeddings_per_sec = embedsPerSec,
+        docs_skipped_ratio = docsSkippedRatio,
+        embeddings_reuse_ratio = embeddingsReuseRatio,
+        publish_ts = timestamp,
+        snapshot_path = snapPath,
+        model_version = s"$modelName-$modelVersion",
+        noop_run = noopRun
+      ))
+
+      if(!spark.catalog.tableExists("rag", "run_metrics")) {
+        logger.info("Creating rag.run_metrics table for the first time")
+        spark.createDataFrame(metrics).write.format("delta").mode("overwrite").saveAsTable("rag.run_metrics")
+      } else {
+        logger.info("Appending run metrics to rag.run_metrics table")
+        spark.createDataFrame(metrics).write.format("delta").mode("append").saveAsTable("rag.run_metrics")
+      }
+
 
 
 

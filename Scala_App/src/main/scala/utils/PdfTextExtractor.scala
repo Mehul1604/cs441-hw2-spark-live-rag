@@ -1,5 +1,6 @@
 package utils
 
+import model.ExtractTextResult
 import org.apache.pdfbox.Loader
 import org.apache.pdfbox.text.{PDFTextStripper, TextPosition}
 import org.apache.tika.metadata.Metadata
@@ -75,6 +76,39 @@ object PdfTextExtractor {
     }
   }
 
+  def safeExtractText(filePath: String): ExtractTextResult = {
+
+    try {
+      Using.resource(Loader.loadPDF(new File(filePath))) { doc =>
+        val stripper = new LenientStripper()
+
+        stripper.setSuppressDuplicateOverlappingText(true) // fixes double-drawn glyphs
+        stripper.setShouldSeparateByBeads(true) // respect article beads (columns)
+        //        stripper.setSortByPosition(true)
+
+
+        val fullText = (1 to doc.getNumberOfPages).toVector.map { pNo =>
+          try {
+            stripper.setStartPage(pNo)
+            stripper.setEndPage(pNo)
+            stripper.getText(doc)
+          } catch {
+            case e: IllegalArgumentException =>
+              println(s"Skipping page $pNo due to font mapping error: ${e.getMessage}")
+              ""
+          }
+        }.mkString("======\n\n======")
+
+        ExtractTextResult(normalize(fullText), s"Successfully extracted text from ${doc.getNumberOfPages} pages." )
+      }
+    } catch {
+      case e: Exception =>
+        println(s"Error extracting text from PDF: ${e.getMessage}")
+        e.printStackTrace()
+        ExtractTextResult("", s"Error extracting text from PDF: ${e.getMessage}" )
+    }
+  }
+
   private def normalize(s: String): String =
     s
       // Remove soft hyphens but keep newlines (removed the de-hyphenation step)
@@ -94,8 +128,8 @@ object PdfTextExtractor {
       .trim
 
   def main(args: Array[String]): Unit = {
-    val pdfFilePath = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/data/text_corpus_small/1083142.1083153.pdf" // Replace with your PDF file path
-    val outputFilePath = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/data/extracted_text_edited.txt" // Output text file path
+    val pdfFilePath = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/data/text_corpus/1083142.1083153.pdf" // Replace with your PDF file path
+    val outputFilePath = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/data/extracted_text.txt" // Output text file path
 
     val writer = new PrintWriter(new File(outputFilePath))
     extractText(pdfFilePath) match {
@@ -269,8 +303,8 @@ object PdfChunker {
    */
   def main(args: Array[String]): Unit = {
     // Default test PDF path - modify this to your actual test PDF file
-    val testPdfPath = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/data/text_corpus_small/1083142.1083153.pdf"
-    val logFilePath = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/data/chunker_test_log_edited.txt"
+    val testPdfPath = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/data/text_corpus/1083142.1083153.pdf"
+    val logFilePath = "/Users/mehulmathur/UIC/Cloud/Project/cs441-hw2-spark-live-rag/data/chunker_test_log.txt"
 
     // Create log file writer
     val logFile = new File(logFilePath)
