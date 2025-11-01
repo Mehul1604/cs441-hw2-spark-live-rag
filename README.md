@@ -1,4 +1,6 @@
 # Incremental RAG Delta Indexer (CS-441 HW2)
+### Mehul Mathur <br>
+UIN: 661985191
 
 A Spark-based pipeline that incrementally indexes a corpus of PDFs for Retrieval-Augmented Generation (RAG). It extracts text, detects language, chunks content, generates embeddings via Ollama, stores data in Delta Lake tables, and publishes versioned retrieval index snapshots. Designed to run locally, against HDFS/S3 via Spark submit, and on AWS EMR.
 
