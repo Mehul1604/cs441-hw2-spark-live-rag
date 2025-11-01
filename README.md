@@ -19,6 +19,22 @@ A Spark-based pipeline that incrementally indexes a corpus of PDFs for Retrieval
 - Add your EMR demo/walkthrough link here (e.g., YouTube):
   - https://example.com/your-emr-video
 
+## Table of contents
+- [Repository layout](#repository-layout)
+- [Building](#building)
+- [Running modes](#running-modes)
+  - [Local development (sbt runMain)](#a-local-development-sbt-runmain)
+  - [Local machine with spark-submit (using fat JAR)](#b-local-machine-with-spark-submit-using-fat-jar)
+  - [EMR + S3 (YARN)](#c-emr--s3-yarn)
+- [End-to-end flow and incremental logic](#end-to-end-flow-and-incremental-logic)
+- [Delta table schemas, keys, and merge logic](#delta-table-schemas-keys-and-merge-logic)
+- [Configuration (Typesafe config)](#configuration-typesafe-config)
+- [Hive support, metastore, and Delta](#hive-support-metastore-and-delta)
+- [Components overview](#components-overview)
+- [Testing](#testing)
+- [Quick examples](#quick-examples)
+- [Troubleshooting](#troubleshooting)
+
 
 ## Repository layout
 Top-level
@@ -133,6 +149,7 @@ spark-submit \
 - application.conf maps `environments.emr` to S3 URIs for `data.source.folder`, `spark.warehouse.dir`, and `data.snapshots.base.path`.
 - Ensure AWS permissions for S3 and Ollama availability (install via bootstrap; the script pulls mxbai-embed-large and warms it up).
 
+
 ## End-to-end flow and incremental logic
 This job is designed to be idempotent and incremental. High-level steps:
 1) Discover PDFs
@@ -231,6 +248,7 @@ Notes on keys and updates
 - Doc edits at same URI update the doc row (same docId) and ripple through chunks/embeddings where text changed.
 - If chunk segmentation stays identical (same index/start/end), `chunkId` is stable; if `chunkText` changes, `chunkContentHash` changes and re-embedding is triggered.
 - Embeddings are model/version-specific, enabling side-by-side indices for different models.
+
 
 ## Configuration (Typesafe config)
 Main file: `Scala_App/src/main/resources/application.conf`
