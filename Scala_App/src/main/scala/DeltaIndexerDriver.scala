@@ -1,5 +1,5 @@
 import config.AppConfig
-import llm.SerializableEmbeddingGenerator
+import llm.{EmbeddingLimiter, SerializableEmbeddingGenerator}
 import model.{ChunkData, RunMetrics}
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.functions._
@@ -129,41 +129,11 @@ object DeltaIndexerDriver {
       // Count and log the number of PDFs loaded
       val pdfCount = rawPdfs.count()
       logger.info(s"Loaded $pdfCount PDF files from $sourceFolder")
-
-      // Create local directory for downloaded PDFs
-      val downloadedPdfsDir = appConfig.data.downloadedPdfsDir
-      val downloadDir = new File(downloadedPdfsDir)
-      if (!downloadDir.exists()) {
-        downloadDir.mkdirs()
-        logger.info(s"Created local PDF download directory: $downloadedPdfsDir")
+      // log file uris of loaded pdfs
+      rawPdfs.select("path").as[String].collect().foreach { path =>
+        logger.info(s"Loaded PDF file: $path")
       }
 
-      // Download PDFs to local file system and create a mapping
-      logger.info("Downloading PDFs to local file system for text extraction...")
-      val pdfPathMapping = rawPdfs.collect().map { row =>
-        val originalPath = row.getAs[String]("path")
-        val content = row.getAs[Array[Byte]]("content")
-        val fileName = new File(originalPath).getName
-        val localPath = s"$downloadedPdfsDir/$fileName"
-        logger.info("To local path: " + localPath)
-
-        // Write the PDF content to local file
-        val localFile = new File(localPath)
-        val fos = new java.io.FileOutputStream(localFile)
-        try {
-          fos.write(content)
-          fos.flush()
-        } finally {
-          fos.close()
-        }
-
-        (originalPath, localPath)
-      }.toMap
-
-      logger.info(s"Downloaded ${pdfPathMapping.size} PDFs to local directory: $downloadedPdfsDir")
-
-      // Create broadcast variable for the path mapping
-      val pathMappingBroadcast = spark.sparkContext.broadcast(pdfPathMapping)
 
       // Test language detector standalone before creating UDF
       val langDetectorService = new SerializableLanguageDetector()
@@ -193,8 +163,7 @@ object DeltaIndexerDriver {
 
       val getTextUdf = udf((fileUri: String) => {
         // Get the local path from the mapping
-        val localPath = pathMappingBroadcast.value.getOrElse(fileUri, fileUri.replace("file:", ""))
-        safeExtractText(localPath)
+        safeExtractText(fileUri)
       })
 
       // Create a UDF that uses the broadcast variable
@@ -422,9 +391,15 @@ object DeltaIndexerDriver {
       val embeddedChunks = chunksToEmbed
         .as[(String, String, String)]
         .mapPartitions { rows =>
+//          logger.info("seeing partition with " + rows.size + " rows to embed")
           val batchedRows = rows.grouped(appConfig.embedding.batchSize).flatMap { batch =>
             val texts = batch.map(_._3).toVector
-            val embeddings = embeddingGeneratorCreator.generateEmbeddings(texts)
+            logger.info("Embedding batch of size: " + texts.size)
+
+//            val embeddings = embeddingGeneratorCreator.generateEmbeddings(texts)
+            val embeddings = EmbeddingLimiter.runOne {
+              embeddingGeneratorCreator.generateEmbeddings(texts)
+            }
             batch.zip(embeddings).map { case ((chunkId, chunkContentHash, _), embedding) =>
               (chunkId, chunkContentHash, modelName, modelVersion, embedding)
             }

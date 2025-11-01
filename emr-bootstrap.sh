@@ -90,6 +90,8 @@ sudo tee /etc/systemd/system/ollama.service.d/override.conf > /dev/null <<'EOF'
 [Service]
 Environment="OLLAMA_HOST=0.0.0.0:11434"
 Environment="OLLAMA_ORIGINS=*"
+Environment="OLLAMA_KEEP_ALIVE=10m"
+Environment="OLLAMA_NUM_PARALLEL=1"
 EOF
 
 # Start and enable Ollama service

@@ -7,6 +7,9 @@ import org.apache.tika.metadata.Metadata
 import org.apache.tika.parser.AutoDetectParser
 import org.apache.tika.sax.BodyContentHandler
 
+// import hdfs filesystem
+import org.apache.hadoop.fs.{FileSystem, Path}
+
 import java.io.{File, FileInputStream, PrintWriter}
 import scala.util.Using
 
@@ -79,6 +82,26 @@ object PdfTextExtractor {
   def safeExtractText(filePath: String): ExtractTextResult = {
 
     try {
+
+      // filePath can be s3:// or hdfs:// or local
+      if(filePath.startsWith("s3://") || filePath.startsWith("hdfs://")) {
+        val hadoopPath = new Path(filePath)
+        val fs = FileSystem.get(hadoopPath.toUri, new org.apache.hadoop.conf.Configuration())
+        val tempLocalFile = File.createTempFile("pdf_temp", ".pdf")
+        tempLocalFile.deleteOnExit()
+
+        // Copy from HDFS/S3 to local temp file
+        Using.resource(fs.open(hadoopPath)) { inputStream =>
+          Using.resource(new java.io.FileOutputStream(tempLocalFile)) { outputStream =>
+            org.apache.hadoop.io.IOUtils.copyBytes(inputStream, outputStream, 4096, true)
+          }
+        }
+
+        // Now extract text from the local temp file
+        return safeExtractText(tempLocalFile.getAbsolutePath)
+      }
+
+
       Using.resource(Loader.loadPDF(new File(filePath))) { doc =>
         val stripper = new LenientStripper()
 

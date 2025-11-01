@@ -82,7 +82,8 @@ class OllamaClient(baseUrl: String = OllamaClient.detectOllamaHost())
 
         val embedFut = service.createEmbeddings(
           input = batch,
-          settings = CreateEmbeddingsSettings(model)
+          settings = CreateEmbeddingsSettings(model),
+
         ).map { response =>
           response.data.map { embeddingData =>
             embeddingData.embedding.map(_.toFloat).toVector
